@@ -8,26 +8,6 @@ const TABLE_NAME = 'UserAuthState';
 const FROM_EMAIL = 'pfh_con_engr_devops@primefocushealth.com';
 const OTP_LENGTH = 4;
 
-const TEST_PHONE_NUMBERS = new Set([
-  '+15550101010',
-  '+18001001000',
-  '+18001001001',
-  '+18001001002',
-  '+18001001003',
-  '+18002002000',
-  '+18002002001',
-  '+18002002002',
-  '+18002002003',
-  '+18003003000',
-  '+18003003001',
-  '+18003003002',
-  '+18003003003'
-]);
-
-function isTestPhoneNumber(phoneNumber) {
-  return TEST_PHONE_NUMBERS.has(phoneNumber);
-}
-
 const cognitoIdp = new AWS.CognitoIdentityServiceProvider();
 
 async function isUserInProviderGroup(userPoolId, userName) {
@@ -39,8 +19,8 @@ async function isUserInProviderGroup(userPoolId, userName) {
   return groups.Groups.some(group => group.GroupName.includes('PROVIDER'));
 }
 
-function generateOTP(phoneNumber) {
-  if (isTestPhoneNumber(phoneNumber)) {
+function generateOTP(phoneNumber, testPhoneNumber) {
+  if (phoneNumber === testPhoneNumber) {
     console.log(`Using fixed OTP for test number: ${phoneNumber}`);
     return '1234';
   }
@@ -98,8 +78,8 @@ async function sendEmailviaSES(emailAddress, passCode) {
  await ses.sendEmail(params).promise();
 }
 
-async function sendOTP(otp, event, userName, phoneNumber) {
-  if (isTestPhoneNumber(phoneNumber)) {
+async function sendOTP(otp, event, userName, phoneNumber, testPhoneNumber) {
+  if (phoneNumber === testPhoneNumber) {
     console.log(`Skipping sending otp, Using fixed OTP for test number: ${phoneNumber}`);
     return;
   }
@@ -141,6 +121,7 @@ exports.handler = async (event) => {
  console.log('CREATE AUTH EVENT: ', JSON.stringify(event, null, 2));
  const session = event.request.session || [];
  const userName = event.userName;
+ const testPhoneNumber = "+15550101010";
  const phoneNumber = event.request.userAttributes.phone_number;
 
  // First step: SELECT_AUTH_FLOW
@@ -165,8 +146,8 @@ exports.handler = async (event) => {
      event.response.challengeMetadata = 'PASSWORD_CHALLENGE';
    }
    else if (state.authFlow === 'OTP_ONLY') {
-     const otp = generateOTP(phoneNumber);
-     await sendOTP(otp, event, userName, phoneNumber);
+     const otp = generateOTP(phoneNumber, testPhoneNumber);
+     await sendOTP(otp, event, userName, phoneNumber, testPhoneNumber);
      
      await dynamodb.update({
        TableName: TABLE_NAME,
@@ -188,8 +169,8 @@ exports.handler = async (event) => {
    session[1].challengeMetadata === 'PASSWORD_CHALLENGE' &&
    session[1].challengeResult === true
  ) {
-   const otp = generateOTP(phoneNumber);
-   await sendOTP(otp, event, userName, phoneNumber);
+   const otp = generateOTP(phoneNumber, testPhoneNumber);
+   await sendOTP(otp, event, userName, phoneNumber, testPhoneNumber);
 
    await dynamodb.update({
      TableName: TABLE_NAME,
@@ -209,8 +190,8 @@ exports.handler = async (event) => {
  if (last.challengeMetadata === 'OTP_CHALLENGE') {
    const state = await getState(userName);
    if (state && state.resendCount > state.lastSentResendCount) {
-     const otp = generateOTP(phoneNumber);
-     await sendOTP(otp, event, userName, phoneNumber);
+     const otp = generateOTP(phoneNumber, testPhoneNumber);
+     await sendOTP(otp, event, userName, phoneNumber, testPhoneNumber);
 
      await dynamodb.update({
        TableName: TABLE_NAME,
