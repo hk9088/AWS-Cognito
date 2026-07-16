@@ -5,8 +5,9 @@ const sns = new AWS.SNS();
 const ses = new AWS.SES({ apiVersion: '2010-12-01' });
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 const TABLE_NAME = 'UserAuthState';
-const FROM_EMAIL = 'pfh_con_engr_devops@primefocushealth.com';
+const FROM_EMAIL = 'pfh_con_engr_lead+dev1@primefocushealth.com';
 const OTP_LENGTH = 4;
+const FLOW_TTL_MS = 5 * 60 * 1000;
 
 const cognitoIdp = new AWS.CognitoIdentityServiceProvider();
 
@@ -19,12 +20,7 @@ async function isUserInProviderGroup(userPoolId, userName) {
   return groups.Groups.some(group => group.GroupName.includes('PROVIDER'));
 }
 
-function generateOTP(phoneNumber, testPhoneNumber) {
-  if (phoneNumber === testPhoneNumber) {
-    console.log(`Using fixed OTP for test number: ${phoneNumber}`);
-    return '1234';
-  }
-
+function generateOTP() {
  let otp = '';
  for (let i = 0; i < OTP_LENGTH; i++) {
    otp += (crypto.randomBytes(1)[0] % 10).toString();
@@ -35,7 +31,7 @@ function generateOTP(phoneNumber, testPhoneNumber) {
 async function sendSMSviaSNS(phoneNumber, passCode) {
  const params = {
      Message: `Your PrimeFocus Health OTP code is: ${passCode}, Do not share this code with anyone. Message & Data rates may apply.
-yRXy5cUWIP6`,
+     sd/kYiq2htd`,
      PhoneNumber: phoneNumber
  };
  await sns.publish(params).promise();
@@ -78,15 +74,11 @@ async function sendEmailviaSES(emailAddress, passCode) {
  await ses.sendEmail(params).promise();
 }
 
-async function sendOTP(otp, event, userName, phoneNumber) {
-  if (isTestPhoneNumber(phoneNumber)) {
-    console.log(`Skipping sending otp, Using fixed OTP for test number: ${phoneNumber}`);
-    return;
-  }
-
+async function sendOTP(otp, event, userName) {
   const { userPoolId, request: { userAttributes } } = event;
   const inProviderGroup = await isUserInProviderGroup(userPoolId, userName);
-
+  
+  // Commented for DEMO
   const sendSMS = !inProviderGroup && userAttributes.phone_number
     ? sendSMSviaSNS(userAttributes.phone_number, otp)
         .then(() => true)
@@ -96,20 +88,20 @@ async function sendOTP(otp, event, userName, phoneNumber) {
         })
     : Promise.resolve(false);
 
-  const sendEmail = userAttributes.email
-    ? sendEmailviaSES(userAttributes.email, otp)
-        .then(() => true)
-        .catch(err => {
-          console.error('Email failed:', err);
-          return false;
-        })
-    : Promise.resolve(false);
+  // const sendEmail = userAttributes.email
+  //   ? sendEmailviaSES(userAttributes.email, otp)
+  //       .then(() => true)
+  //       .catch(err => {
+  //         console.error('Email failed:', err);
+  //         return false;
+  //       })
+  //   : Promise.resolve(false);
 
-  const [smsSuccess, emailSuccess] = await Promise.all([sendSMS, sendEmail]);
+  // const [smsSuccess, emailSuccess] = await Promise.all([sendSMS, sendEmail]);
 
-  if (!smsSuccess && !emailSuccess) {
-    throw new Error('Failed to send OTP via both SMS and Email');
-  }
+  // if (!smsSuccess && !emailSuccess) {
+  //   throw new Error('Failed to send OTP via both SMS and Email');
+  // }
 }
 
 async function getState(userName) {
@@ -121,7 +113,6 @@ exports.handler = async (event) => {
  console.log('CREATE AUTH EVENT: ', JSON.stringify(event, null, 2));
  const session = event.request.session || [];
  const userName = event.userName;
- const phoneNumber = event.request.userAttributes.phone_number;
 
  // First step: SELECT_AUTH_FLOW
  if (session.length === 0) {
@@ -145,14 +136,14 @@ exports.handler = async (event) => {
      event.response.challengeMetadata = 'PASSWORD_CHALLENGE';
    }
    else if (state.authFlow === 'OTP_ONLY') {
-     const otp = generateOTP(phoneNumber);
-     await sendOTP(otp, event, userName, phoneNumber);
+     const otp = generateOTP();
+     await sendOTP(otp, event, userName);
      
      await dynamodb.update({
        TableName: TABLE_NAME,
        Key: { userName },
-       UpdateExpression: 'set otp = :otp, resendCount = :zero, lastSentResendCount = :zero, otpAttempts = :zero',
-       ExpressionAttributeValues: { ':otp': otp, ':zero': 0 },
+       UpdateExpression: 'set otp = :otp, resendCount = :zero, lastSentResendCount = :zero, otpAttempts = :zero, ttl = :ttl',
+       ExpressionAttributeValues: { ':otp': otp, ':zero': 0 , 'ttl': FLOW_TTL_MS},
      }).promise();
      event.response.publicChallengeParameters = { challenge: 'OTP_CHALLENGE' };
      event.response.privateChallengeParameters = { challengeMetadata: 'OTP_CHALLENGE' };
@@ -168,14 +159,14 @@ exports.handler = async (event) => {
    session[1].challengeMetadata === 'PASSWORD_CHALLENGE' &&
    session[1].challengeResult === true
  ) {
-   const otp = generateOTP(phoneNumber);
-   await sendOTP(otp, event, userName, phoneNumber);
+   const otp = generateOTP();
+   await sendOTP(otp, event, userName);
 
    await dynamodb.update({
      TableName: TABLE_NAME,
      Key: { userName },
-     UpdateExpression: 'set otp = :otp, resendCount = :zero, lastSentResendCount = :zero, otpAttempts = :zero',
-     ExpressionAttributeValues: { ':otp': otp, ':zero': 0 },
+     UpdateExpression: 'set otp = :otp, resendCount = :zero, lastSentResendCount = :zero, otpAttempts = :zero, ttl = :ttl',
+     ExpressionAttributeValues: { ':otp': otp, ':zero': 0 , 'ttl': FLOW_TTL_MS},
    }).promise();
    event.response.publicChallengeParameters = { challenge: 'OTP_CHALLENGE' };
    event.response.privateChallengeParameters = { challengeMetadata: 'OTP_CHALLENGE' };
@@ -189,14 +180,14 @@ exports.handler = async (event) => {
  if (last.challengeMetadata === 'OTP_CHALLENGE') {
    const state = await getState(userName);
    if (state && state.resendCount > state.lastSentResendCount) {
-     const otp = generateOTP(phoneNumber);
-     await sendOTP(otp, event, userName, phoneNumber);
+     const otp = generateOTP();
+     await sendOTP(otp, event, userName);
 
      await dynamodb.update({
        TableName: TABLE_NAME,
        Key: { userName },
-       UpdateExpression: 'set otp = :otp, lastSentResendCount = :resend',
-       ExpressionAttributeValues: { ':otp': otp, ':resend': state.resendCount },
+       UpdateExpression: 'set otp = :otp, lastSentResendCount = :resend, ttl = :ttl',
+       ExpressionAttributeValues: { ':otp': otp, ':resend': state.resendCount, 'ttl': FLOW_TTL_MS},
      }).promise();
    }
    event.response.publicChallengeParameters = { challenge: 'OTP_CHALLENGE' };
